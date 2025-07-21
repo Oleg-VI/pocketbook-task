@@ -1,0 +1,17 @@
+# Build folders
+build/
+
+# bmp files
+*.bmp
+
+# Qt Creator project files
+*.autosave
+*.user
+*.user.*
+*.pro.user
+*.pro.user.*
+*.qbs.user
+*.qbs.user.*
+
+
+
