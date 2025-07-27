@@ -4,6 +4,69 @@
 
 namespace ImageCompression {
 
+// === === Клас для роботи з потоком бітів === ===
+
+class BitStream {
+public:
+    BitStream() : m_buffer(1, 0), m_bitPos(0), m_bytePos(0) {}
+
+    void writeBit(bool bit) {    // Записує один біт у потік
+        if (m_bitPos == 8) {
+            m_buffer.push_back(0);
+            m_bytePos++;
+            m_bitPos = 0;
+        }
+        if (bit) {
+            m_buffer[m_bytePos] |= (1 << (7 - m_bitPos));
+        }
+        m_bitPos++;
+    }
+
+    void writeByte(unsigned char byte) {    // Записує байт у потік (8 біт)
+        for (int i = 7; i >= 0; --i) {
+            writeBit((byte >> i) & 1);
+        }
+    }
+
+    bool readBit() {    // Зчитує один біт з потоку
+        if (m_bytePos >= m_buffer.size()) {
+            throw std::out_of_range("Attempted to read past end of bitstream.");
+        }
+        bool bit = (m_buffer[m_bytePos] >> (7 - m_bitPos)) & 1;
+        m_bitPos++;
+        if (m_bitPos == 8) {
+            m_bitPos = 0;
+            m_bytePos++;
+        }
+        return bit;
+    }
+
+    unsigned char readByte() {    // Зчитує байт з потоку (8 біт)
+        uint8_t value = 0;
+        for (int i = 0; i < 8; ++i) {
+            value = (value << 1) | readBit();
+        }
+        return value;
+    }
+
+    const std::vector<uint8_t>& data() const {    // Отримує внутрішній буфер
+        return m_buffer;
+    }
+
+    void setBuffer(const std::vector<uint8_t>& buffer) {    // Встановлює буфер та скидає позицію читання
+        m_buffer = buffer;
+        m_bytePos = 0;
+        m_bitPos = 0;
+    }
+
+private:
+    std::vector<uint8_t> m_buffer;
+    int m_bitPos;       // Поточна позиція біта в поточному байті (0-7)
+    size_t m_bytePos;   // Поточна позиція байта в буфері
+};
+
+// === === Робота з bmp форматом === ===
+
 #pragma pack(push, 1)
 struct BmpFileHeader {
     quint16 bfType;
@@ -99,6 +162,8 @@ bool saveBmp(const QString& path, const RawImageData& image) {
     return true;
 }
 
+// === === Функції стискання та розтискання === ===
+
 std::vector<uint8_t> compress(const RawImageData &image) {
     std::vector<uint8_t> result;
 
@@ -116,10 +181,11 @@ std::vector<uint8_t> compress(const RawImageData &image) {
     const int rowSize = image.width;
 
     // Маска рядка
-    const int rowMaskSize = (rowCount + 7) / 8; // 1 біт на рідок
+    const int rowMaskSize = (rowCount + 7) / 8; // 1 біт на рядок
     std::vector<uint8_t> rowMask(rowMaskSize, 0);
 
-    std::vector<uint8_t> payload;
+    // Поток кодованих даних
+    BitStream payloadBitStream;
 
     for (int j = 0; j < rowCount; ++j) {
         bool isEmpty = true;
@@ -142,22 +208,22 @@ std::vector<uint8_t> compress(const RawImageData &image) {
                 group[k] = image.data[j * rowSize + i + k];
             }
 
-            // !!! Тут біти (0b0, 0b10, 0b11) можа було б стиснути, не виділяючи окремий байт під кожну комбінацію,
-            // !!! та залишимо такий оптимізований варіант для платної розробки =)
             if (group[0] == 0xFF && group[1] == 0xFF && group[2] == 0xFF && group[3] == 0xFF) {
-                payload.push_back(0b00000000); // 0b0
+                payloadBitStream.writeBit(0); // 0b0
             } else if (group[0] == 0x00 && group[1] == 0x00 && group[2] == 0x00 && group[3] == 0x00) {
-                payload.push_back(0b00000010); // 0b10
+                payloadBitStream.writeBit(1); // 0b10
+                payloadBitStream.writeBit(0);
             } else {
-                payload.push_back(0b00000011); // 0b11
+                payloadBitStream.writeBit(1); // 0b11
+                payloadBitStream.writeBit(1);
                 for (int k = 0; k < count; ++k)
-                    payload.push_back(group[k]);
+                    payloadBitStream.writeByte(group[k]);
             }
         }
     }
 
     result.insert(result.end(), rowMask.begin(), rowMask.end());
-    result.insert(result.end(), payload.begin(), payload.end());
+    result.insert(result.end(), payloadBitStream.data().begin(), payloadBitStream.data().end());
     return result;
 }
 
@@ -175,34 +241,31 @@ RawImageData decompress(const std::vector<uint8_t> &compressedData) {
     const int rowSize = width;
     const int rowMaskSize = (height + 7) / 8;
     const uint8_t* rowMask = compressedData.data() + 10;
-    const uint8_t* data = rowMask + rowMaskSize;
 
     std::vector<uint8_t> imageData(width * height, 0xFF);
 
-    size_t dataIndex = 0;
+    BitStream dataBitStream;
+    dataBitStream.setBuffer(compressedData);
+    for (int i = 0; i < 10 + rowMaskSize; ++i) {
+        dataBitStream.readByte(); // відступаемо до стисненних даних рядків
+    }
     for (int j = 0; j < height; ++j) {
         bool isEmpty = rowMask[j / 8] & (1 << (j % 8));
         if (isEmpty) continue;
 
         for (int i = 0; i < width;) {
-            if (dataIndex >= compressedData.size() - 10 - rowMaskSize)
-                throw std::runtime_error("Unexpected end of data");
-
-            uint8_t code = data[dataIndex++];
-            if ((code & 0b11) == 0b00) {
-                for (int k = 0; k < 4 && i + k < width; ++k)
+            if (dataBitStream.readBit() == 0) {         // Код 0: чотири білих пікселі
+                for (int k = 0; (k < 4) && (i + k < width); ++k)
                     imageData[j * rowSize + i + k] = 0xFF;
                 i += 4;
-            } else if ((code & 0b11) == 0b10) {
-                for (int k = 0; k < 4 && i + k < width; ++k)
+            } else if (dataBitStream.readBit() == 0) {  // Код 10: чотири чорних пікселі
+                for (int k = 0; (k < 4) && (i + k < width); ++k)
                     imageData[j * rowSize + i + k] = 0x00;
                 i += 4;
-            } else if ((code & 0b11) == 0b11) {
-                for (int k = 0; k < 4 && i + k < width; ++k)
-                    imageData[j * rowSize + i + k] = data[dataIndex++];
+            } else {                                    // Код 11: чотири будь-які інші пікселі
+                for (int k = 0; (k < 4) && (i + k < width); ++k)
+                    imageData[j * rowSize + i + k] = dataBitStream.readByte();
                 i += 4;
-            } else {
-                throw std::runtime_error("Unknown code block");
             }
         }
     }
