@@ -1,6 +1,7 @@
 #include "ImageCompression.h"
 #include <stdexcept>
 #include <QFile>
+#include <fstream>
 
 namespace ImageCompression {
 
@@ -92,6 +93,7 @@ struct BmpInfoHeader {
 #pragma pack(pop)
 
 bool loadBmp(const QString& path, RawImageData& outImage) {
+    /*
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) return false;
 
@@ -120,9 +122,46 @@ bool loadBmp(const QString& path, RawImageData& outImage) {
             file.read(nullptr, stride - width); // пропустити відступ
     }
     return true;
+    */
+
+    /* */
+    std::ifstream file(path.toStdString(), std::ios::binary);
+    if (!file.is_open()) {
+        return false;
+    }
+
+    // Читаємо заголовок BMP (спрощена версія для grayscale)
+    uint8_t header[54];
+    file.read(reinterpret_cast<char*>(header), 54);
+
+    if (header[0] != 'B' || header[1] != 'M') {
+        return false; // Не BMP файл
+    }
+
+    // Отримуємо розміри зображення
+    outImage.width = *reinterpret_cast<int32_t*>(&header[18]);
+    outImage.height = *reinterpret_cast<int32_t*>(&header[22]);
+
+    // Для спрощення припускаємо, що це 8-бітне grayscale зображення
+    int dataSize = outImage.width * outImage.height;
+    outImage.data.resize(dataSize);
+
+    // Пропускаємо палітру кольорів (для 8-бітного зображення)
+    uint32_t offset = *reinterpret_cast<int32_t*>(&header[10]);
+    file.seekg(offset, std::ios::beg);
+
+    // Читаємо дані зображення (BMP зберігає рядки знизу вверх)
+    for (int y = outImage.height - 1; y >= 0; y--) {
+        file.read(reinterpret_cast<char*>(outImage.data.data() + y * outImage.width), outImage.width);
+        // Пропускаємо padding
+        int padding = (4 - (outImage.width % 4)) % 4;
+        file.seekg(padding, std::ios::cur);
+    }
+    return true;
 }
 
 bool saveBmp(const QString& path, const RawImageData& image) {
+    /*
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly)) return false;
 
@@ -157,6 +196,56 @@ bool saveBmp(const QString& path, const RawImageData& image) {
     for (int y = image.height - 1; y >= 0; --y) {
         file.write(reinterpret_cast<const char*>(image.data.data() + y * image.width), image.width);
         file.write(pad, padding);
+    }
+
+    return true;
+    */
+
+    /* */
+    std::ofstream file(path.toStdString(), std::ios::binary);
+    if (!file.is_open()) {
+        return false;
+    }
+
+    // Заголовок BMP файлу для 8-бітного grayscale
+    uint8_t header[54] = {0};
+
+    // Файлова сигнатура
+    header[0] = 'B';
+    header[1] = 'M';
+
+    // Розмір файлу
+    int padding = (4 - (image.width % 4)) % 4;
+    int imageSize = (image.width + padding) * image.height;
+    int fileSize = 54 + 1024 + imageSize; // 54 + палітра + дані
+
+    *reinterpret_cast<uint32_t*>(&header[2]) = fileSize;
+    *reinterpret_cast<uint32_t*>(&header[10]) = 54 + 1024; // Зміщення до даних
+
+    // Інформаційний заголовок
+    *reinterpret_cast<uint32_t*>(&header[14]) = 40; // Розмір заголовка
+    *reinterpret_cast<int32_t*>(&header[18]) = image.width;
+    *reinterpret_cast<int32_t*>(&header[22]) = image.height;
+    *reinterpret_cast<uint16_t*>(&header[26]) = 1; // Кількість площин
+    *reinterpret_cast<uint16_t*>(&header[28]) = 8; // Біт на піксель
+    *reinterpret_cast<uint32_t*>(&header[34]) = imageSize;
+
+    file.write(reinterpret_cast<char*>(header), 54);
+
+    // Записуємо grayscale палітру
+    for (int i = 0; i < 256; i++) {
+        uint8_t color[4] = {static_cast<uint8_t>(i), static_cast<uint8_t>(i), static_cast<uint8_t>(i), 0};
+        file.write(reinterpret_cast<char*>(color), 4);
+    }
+
+    // Записуємо дані зображення (BMP зберігає рядки знизу вверх)
+    for (int y = image.height - 1; y >= 0; y--) {
+        file.write(reinterpret_cast<const char*>(image.data.data() + y * image.width), image.width);
+
+        // Додаємо padding
+        for (int p = 0; p < padding; p++) {
+            file.put(0);
+        }
     }
 
     return true;
